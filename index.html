@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ficha da Vida">
+<title>Ficha da Vida</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-escuro">
+<div id="app"></div>
+<nav id="nav" style="display:none">
+  <button data-tab="hoje" class="on"><span>🔥</span>Hoje</button>
+  <button data-tab="ficha"><span>🧙</span>Ficha</button>
+  <button data-tab="loja"><span>🏪</span>Loja</button>
+  <button data-tab="cronicas"><span>📜</span>Crônicas</button>
+  <button data-tab="mais"><span>☰</span>Mais</button>
+</nav>
+<div id="modal"></div>
+<div id="toasts"></div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
