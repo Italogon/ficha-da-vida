@@ -23,7 +23,7 @@ function freshState() {
   return {
     v: 1, onboarded: false, created: today(), lastProcessed: null,
     profile: { nome: '', idade: '', classe: 'equilibrado', futuro: '', avatar: { type: 'preset', key: 'cavaleiro' }, cover: null, frame: 'none', avatarFrame: 'auto', titulo: '', },
-    settings: { tema: 'escuro', accent: '#f59e0b', meta: 'media', orcamento: 0, goldCap: 1000, lembrete: '20:00', lembreteOn: false, backupDias: 7, githubRepo: '', githubPasta: 'backups' },
+    settings: { tema: 'escuro', accent: '#f59e0b', meta: 'media', orcamento: 0, goldCap: 1000, lembrete: '20:00', lembreteOn: false, backupDias: 7, githubRepo: '', githubPasta: 'backups', recMes: 7, recAno: 37 },
     missions: clone(DEFAULT_MISSIONS),
     lists: clone(DEFAULT_LISTS),
     shop: clone(DEFAULT_SHOP),
@@ -33,12 +33,17 @@ function freshState() {
     levels: { fisico: 1, mental: 1, criativo: 1, prog: 1 }, levelSpent: { fisico: 0, mental: 0, criativo: 0, prog: 0 },
     testsLog: [], freezes: 0, frozen: {}, repaired: {}, folga: {}, broken: [], best: {}, streakReward: {},
     chests: [], chestDays: {}, chestHistory: [], purchases: [],
-    bossWon: {}, framesOwned: ['none'], badges: {}, chronicles: [], reviews: {}, notifiedDay: null
+    bossWon: {}, framesOwned: ['none'], badges: {}, chronicles: [], reviews: {}, notifiedDay: null,
+    roleta: clone(DEFAULT_ROLETA).concat([clone(VIDEO_CAT)]), roletaHist: [], recovery: { active: false, since: null }, recDays: {}, recReturns: 0, mood: {}, refs: [], v13: true
   };
 }
 function load() {
-  try { const raw = localStorage.getItem(KEY); if (raw) { const f = freshState(); S = Object.assign(f, JSON.parse(raw)); S.settings = Object.assign(freshState().settings, S.settings); return; } } catch (e) { console.warn(e); }
-  S = freshState();
+  try { const raw = localStorage.getItem(KEY); if (raw) { const f = freshState(); const saved = JSON.parse(raw); S = Object.assign(f, saved); if (!saved.v13) S.v13 = false; S.settings = Object.assign(freshState().settings, S.settings); normalize(); return; } } catch (e) { console.warn(e); }
+  S = freshState(); normalize();
+}
+function normalize() {
+  if (!S.v13) { if (!S.roleta.find(c => c.id === 'videos')) S.roleta.push(clone(VIDEO_CAT)); S.refs ||= []; S.v13 = true; }
+  for (const c of S.roleta) for (const it of c.itens) it.id ||= uid();
 }
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('⚠️ Não consegui salvar (armazenamento cheio?)'); } }
 
@@ -92,7 +97,7 @@ const testUnlocked = attr => S.levels[attr] < maxLevel(attr) && xpInLevel(attr) 
 const activeMissions = () => S.missions.filter(m => !m.off);
 const logOf = d => S.log[d] || {};
 function entry(d, id) { return logOf(d)[id]; }
-function bridge(attr, d) { return !!(S.frozen[attr]?.[d] || S.folga[d] || S.repaired[attr]?.[d]); }
+function bridge(attr, d) { return !!(S.frozen[attr]?.[d] || S.folga[d] || S.repaired[attr]?.[d] || S.recDays?.[d]); }
 function dayOk(attr, d) {
   const L = logOf(d); const ms = activeMissions().filter(m => m.attr === attr);
   const dailyMand = ms.filter(m => m.freq === 'daily' && m.mandatory);
@@ -121,6 +126,7 @@ function processDays() {
   if (d < S.created) d = S.created;
   const notes = [];
   while (d <= y) {
+    if (S.recovery?.active && !tryRecoveryDay(d)) notes.push('🌙 Seus dias de recuperação acabaram. A versão mínima das missões continua salvando a sequência.');
     const risk = STREAK_ATTRS.filter(a => !dayOk(a, d) && !bridge(a, d)).map(a => [a, streakEnding(a, addDays(d, -1))]).filter(([, prev]) => prev > 0);
     if (risk.length && S.freezes > 0) {
       S.freezes--; risk.forEach(([a]) => (S.frozen[a] ||= {})[d] = true);
@@ -247,6 +253,7 @@ const BADGES = [
   { id: 'colec', icon: '🛍️', nome: 'Colecionador', tiers: [10], desc: 'Recompensas compradas', get: () => S.purchases.length },
   { id: 'equil', icon: '⚖️', nome: 'Equilíbrio Perfeito', tiers: [1], desc: 'Os 3 atributos no mesmo nível (2+)', get: () => (S.levels.fisico === S.levels.mental && S.levels.mental === S.levels.criativo && S.levels.fisico >= 2) ? 1 : 0 },
   { id: 'revisor', icon: '🔎', nome: 'Autoconhecimento', tiers: [1, 12, 52], desc: 'Revisões feitas', get: () => Object.keys(S.reviews).length },
+  { id: 'resil', icon: '🌱', nome: 'Resiliência', tiers: [1, 3], desc: 'Voltar depois de um Modo Recuperação', get: () => S.recReturns || 0 },
   { id: 'coruja', icon: '🦉', nome: 'Coruja', tiers: [1], secret: true, desc: 'Cumprir uma missão depois da meia-noite', get: countAnyLate },
   { id: 'cheio', icon: '🐉', nome: 'Tesouro do Dragão', tiers: [1], secret: true, desc: 'Encher a bolsa de ouro', get: () => goldNow() >= S.settings.goldCap ? 1 : 0 }
 ];
@@ -267,7 +274,11 @@ function checkBadges() {
 function afterChange() {
   const t = today();
   // baú diário
-  if (!S.chestDays[t] && STREAK_ATTRS.every(a => dayOk(a, t))) { S.chestDays[t] = true; grantChest(rollRarity(), 'Missões do dia completas'); toast('🎁 Missões do dia completas! Um baú te espera.'); }
+  if (!S.chestDays[t] && STREAK_ATTRS.every(a => dayOk(a, t))) {
+    S.chestDays[t] = true; grantChest(rollRarity(), 'Missões do dia completas');
+    if (S.freezes < MAX_FREEZES) { S.freezes++; toast(`🎁 Meta do dia cumprida! Baú + 🧊 1 bloqueio de ofensiva (${S.freezes}/${MAX_FREEZES}).`); }
+    else toast('🎁 Meta do dia cumprida! Um baú te espera. (Bloqueios no máximo: 7/7)');
+  }
   // marcos de sequência
   for (const a of STREAK_ATTRS) {
     const s = streak(a); const r = (S.streakReward[a] ||= { last: 0 });
@@ -363,7 +374,7 @@ function render() {
   if (!S.onboarded) return renderOnboarding();
   $('#nav').style.display = '';
   const views = { hoje: viewHoje, ficha: viewFicha, loja: viewLoja, cronicas: viewCronicas, mais: viewMais };
-  $('#app').innerHTML = `<header class="topbar"><div class="tb-left">${avatarHTML(34)}<div><div class="tb-name">${esc(S.profile.nome || 'Aventureiro')}</div><div class="tb-sub">${esc(currentTitle())}</div></div></div><div class="tb-right"><span class="chip gold">🪙 ${goldNow()}</span><span class="chip">🧊 ${S.freezes}</span></div></header><main class="view">${views[tab]()}</main>`;
+  $('#app').innerHTML = `<header class="topbar"><div class="tb-left">${avatarHTML(34)}<div><div class="tb-name">${esc(S.profile.nome || 'Aventureiro')}</div><div class="tb-sub">${esc(currentTitle())}</div></div></div><div class="tb-right"><span class="chip gold">🪙 ${goldNow()}</span><span class="chip" title="Bloqueios de ofensiva">🧊 ${S.freezes}/${MAX_FREEZES}</span></div></header><main class="view">${views[tab]()}</main>`;
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   hydratePhotos();
 }
@@ -371,6 +382,11 @@ function render() {
 /* ---------- Aba: Hoje ---------- */
 function avisos() {
   const t = today(); const out = [];
+  if (S.recEndedNotice) out.push({ cls: 'info', html: `🌙 Seus dias de recuperação deste período acabaram. Se ainda estiver difícil, tudo bem: a <b>versão mínima</b> já salva a sequência, e conversar com alguém pode ajudar. <button class="btn sm" data-act="sub" data-sub="recuperacao" data-go="1">Ver apoio</button> <button class="btn sm" data-act="recnoticeok">Ok</button>` });
+  if (S.recovery?.active) {
+    if (S.chests.length) out.push({ cls: 'good', html: `🎁 Você tem <b>${S.chests.length}</b> baú(s) para abrir. <button class="btn sm" data-act="go" data-tab="loja">Abrir</button>` });
+    return out;
+  }
   for (const b of S.broken) out.push({ cls: 'danger', html: `💔 Sequência de <b>${ATTRS[b.attr].nome}</b> (${b.lost} dias) quebrou. <button class="btn sm" data-act="repair" data-id="${b.id}">Consertar (${REPAIR_COST} 🪙)</button>` });
   if (S.chests.length) out.push({ cls: 'good', html: `🎁 Você tem <b>${S.chests.length}</b> baú(s) para abrir. <button class="btn sm" data-act="go" data-tab="loja">Abrir</button>` });
   const pr = pendingReviews(); if (pr.length) out.push({ cls: 'info', html: `🔎 Revisão da ${pr[0].tipo} disponível. <button class="btn sm" data-act="review" data-key="${pr[0].key}">Fazer</button>` });
@@ -388,11 +404,14 @@ function viewHoje() {
   const t = today(); const wk = weekKey(); const boss = bossOf(wk); const hp = bossHP(wk); const dmg = Math.min(hp, bossDmg(wk)); const won = S.bossWon[wk];
   const av = avisos();
   let h = `<div class="date-line">${esc(fmtFull(t))}</div>`;
+  if (S.recovery?.active) h += recoveryBanner();
+  h += `<div class="quick no-print"><button class="btn sm" data-act="sub" data-sub="roleta" data-go="1">🎡 Roleta</button><button class="btn sm" data-act="sub" data-sub="relatorio" data-go="1">📄 Relatório</button><button class="btn sm" data-act="sub" data-sub="referencias" data-go="1">📌 Referências</button>${S.recovery?.active ? '' : '<button class="btn sm" data-act="sub" data-sub="recuperacao" data-go="1">🌙 Fase difícil?</button>'}</div>`;
+  h += moodRow(t);
   if (av.length) h += `<section class="avisos">${av.map(a => `<div class="aviso ${a.cls}">${a.html}</div>`).join('')}</section>`;
   // sequências
   h += `<section class="streaks">${STREAK_ATTRS.map(a => { const s = streak(a); const ok = dayOk(a, t); return `<div class="streak ${ok ? 'lit' : ''}" style="--c:${ATTRS[a].cor}"><div class="fire">${ok ? '🔥' : '🕯️'}</div><div class="sn">${s}</div><div class="sl">${ATTRS[a].nome}</div></div>`; }).join('')}</section>`;
   // chefe
-  h += `<section class="card boss ${won ? 'won' : ''}"><div class="boss-top"><div class="boss-emoji">${boss.emoji}</div><div class="grow"><div class="kicker">Chefe da semana</div><div class="boss-name">${esc(boss.nome)}</div></div><div class="boss-hp">${won ? '☠️ Derrotado' : `${hp - dmg} HP`}</div></div>${bar(hp - dmg, hp, '#ef4444')}<div class="muted small">${won ? `Recompensa: moldura “${FRAMES[boss.frame]}” para a capa do perfil.` : `Cada missão causa dano. Derrote até domingo para ganhar a moldura “${FRAMES[boss.frame]}” + baú raro.`}</div></section>`;
+  h += `<section class="card boss ${won ? 'won' : ''}"><div class="boss-top"><div class="boss-emoji">${boss.emoji}</div><div class="grow"><div class="kicker">Chefe da semana</div><div class="boss-name">${esc(boss.nome)}</div></div><div class="boss-hp">${won ? '☠️ Derrotado' : `${hp - dmg} HP`}</div></div>${bar(hp - dmg, hp, '#ef4444')}<div class="muted small">${S.recovery?.active && !won ? '😴 O chefe também está descansando. Sem pressa: ele espera você.' : won ? `Recompensa: moldura “${FRAMES[boss.frame]}” para a capa do perfil.` : `Cada missão causa dano. Derrote até domingo para ganhar a moldura “${FRAMES[boss.frame]}” + baú raro.`}</div></section>`;
   // missões por atributo
   for (const a of Object.keys(ATTRS)) {
     const ms = activeMissions().filter(m => m.attr === a); if (!ms.length) continue;
@@ -403,7 +422,7 @@ function viewHoje() {
   // bônus
   const bon = dailyBonus(t); const bd = S.bonusDone[t] || [];
   h += `<section class="card"><div class="sec-title"><span>🎲 Missões bônus do dia</span><span class="small muted">+15 XP · +10 🪙</span></div>${bon.map((b, i) => `<div class="mission ${bd.includes(i) ? 'done' : ''}"><button class="check" data-act="bonus" data-i="${i}">${bd.includes(i) ? '✓' : ''}</button><div class="grow"><div class="mn">${esc(b.t)}</div><div class="small muted">${ATTRS[b.attr].icon} ${ATTRS[b.attr].nome}</div></div></div>`).join('')}</section>`;
-  h += `<p class="muted small center">Complete todas as obrigatórias do dia (versão mínima vale) para ganhar um baú. 🎁</p>`;
+  h += `<p class="muted small center">Complete todas as obrigatórias do dia (versão mínima vale) para ganhar um baú 🎁 e +1 bloqueio de ofensiva 🧊 (até ${MAX_FREEZES}).</p>`;
   return h;
 }
 function missionRow(m, d) {
@@ -411,7 +430,7 @@ function missionRow(m, d) {
   const wk = m.freq === 'weekly' ? `<span class="tag">${weeklyCount(m.id)}/${m.target}/sem</span>` : '';
   return `<div class="mission ${cls}">
     <button class="check" data-act="mark" data-id="${m.id}" data-kind="full" aria-label="Feito">${e?.kind === 'full' ? '✓' : e?.kind === 'min' ? '½' : ''}</button>
-    <div class="grow"><div class="mn">${esc(m.nome)} ${m.mandatory ? '<span class="tag must">obrigatória</span>' : ''} ${wk}</div>
+    <div class="grow"><div class="mn">${esc(m.nome)} ${m.mandatory && !S.recovery?.active ? '<span class="tag must">obrigatória</span>' : ''} ${wk}</div>
       <div class="small muted">Mínima: ${esc(m.minimo || '—')}</div>
       <div class="m-actions">
         <button class="btn xs ${e?.kind === 'min' ? 'on' : ''}" data-act="mark" data-id="${m.id}" data-kind="min">½ Mínima</button>
@@ -491,9 +510,9 @@ function heatmap() {
     const d = addDays(start, w * 7 + i); if (d > today()) { cells += `<i class="hm f"></i>`; continue; }
     const n = Object.values(logOf(d)).reduce((s, e) => s + (e.kind === 'full' ? 1 : 0.5), 0) + (S.bonusDone[d] || []).length;
     const lv = n === 0 ? 0 : n < 2 ? 1 : n < 4 ? 2 : n < 6 ? 3 : 4;
-    cells += `<i class="hm l${lv}" title="${fmtD(d)}: ${n}"></i>`;
+    cells += `<i class="hm l${lv} ${S.recDays?.[d] ? 'rec' : ''}" title="${fmtD(d)}: ${n}${S.recDays?.[d] ? ' (recuperação)' : ''}"></i>`;
   }
-  return `<div class="heat" style="grid-template-columns:repeat(${weeks},1fr)">${cells}</div><div class="small muted heat-leg">menos <i class="hm l0"></i><i class="hm l1"></i><i class="hm l2"></i><i class="hm l3"></i><i class="hm l4"></i> mais</div>`;
+  return `<div class="heat" style="grid-template-columns:repeat(${weeks},1fr)">${cells}</div><div class="small muted heat-leg">menos <i class="hm l0"></i><i class="hm l1"></i><i class="hm l2"></i><i class="hm l3"></i><i class="hm l4"></i> mais · <i class="hm rec"></i> pausa</div>`;
 }
 function openTest(a) {
   const L = S.levels[a]; const t = S.tests[a][L - 1];
@@ -555,7 +574,7 @@ function buy(id) {
   if (g < it.preco) return toast(`Faltam ${it.preco - g} 🪙.`);
   const orc = Number(S.settings.orcamento) || 0;
   if (it.reais && orc && weekSpentReais() + it.reais > orc) return toast(`💵 Isso passaria do orçamento da semana (R$ ${orc}).`);
-  if (it.tipo === 'protetor' && S.freezes >= 2) return toast('🧊 Você já tem o máximo de 2 protetores.');
+  if (it.tipo === 'protetor' && S.freezes >= MAX_FREEZES) return toast(`🧊 Você já tem o máximo de ${MAX_FREEZES} bloqueios.`);
   if (it.tipo === 'folga' && S.folga[today()]) return toast('Hoje já é dia de folga.');
   addLedger('buy:' + uid(), null, 0, -it.preco, 'Compra: ' + it.nome);
   S.purchases.push({ nome: it.nome, preco: it.preco, reais: it.reais || 0, d: today() });
@@ -657,9 +676,9 @@ function wrap(g, text, x, y, maxW, lh, maxLines) {
 /* ---------- Aba: Mais ---------- */
 let sub = null;
 function viewMais() {
-  const subs = { perfil: viewPerfil, emblemas: viewEmblemas, revisoes: viewRevisoes, missoes: viewMissoes, testes: viewTestes, stats: viewStats, config: viewConfig, diario: viewDiario };
+  const subs = { referencias: viewRefs, roleta: viewRoleta, relatorio: viewRelatorio, recuperacao: viewRecuperacao, perfil: viewPerfil, emblemas: viewEmblemas, revisoes: viewRevisoes, missoes: viewMissoes, testes: viewTestes, stats: viewStats, config: viewConfig, diario: viewDiario };
   if (sub && subs[sub]) return `<button class="btn sm back" data-act="sub" data-sub="">← Voltar</button>` + subs[sub]();
-  const items = [['perfil', '🎨', 'Personalização', 'Avatar, capa, moldura, tema'], ['revisoes', '🔎', 'Revisões', `Semanal, mensal e anual${pendingReviews().length ? ' · ' + pendingReviews().length + ' pendente(s)' : ''}`], ['emblemas', '🏅', 'Emblemas', `${Object.keys(S.badges).length}/${BADGES.length} conquistados`], ['diario', '📸', 'Diário de provas', 'Todas as fotos por data'], ['stats', '📊', 'Estatísticas', 'Totais e histórico'], ['missoes', '📋', 'Editar missões', 'Obrigatórias, semanais, mínimas'], ['testes', '⚔️', 'Testes de nível', 'Ver e editar'], ['config', '⚙️', 'Configurações', 'Lembretes, orçamento, backup']];
+  const items = [['roleta', '🎡', 'Roleta', 'Sorteie um filme, desenho, jogo...'], ['relatorio', '📄', 'Relatório', 'Semanal, mensal e anual para imprimir'], ['referencias', '📌', 'Referências', `${S.refs.length} guardada(s): episódios, páginas, painéis`], ['recuperacao', '🌙', 'Modo Recuperação', S.recovery?.active ? 'Ativo agora' : 'Para fases difíceis'], ['perfil', '🎨', 'Personalização', 'Avatar, capa, moldura, tema'], ['revisoes', '🔎', 'Revisões', `Semanal, mensal e anual${pendingReviews().length ? ' · ' + pendingReviews().length + ' pendente(s)' : ''}`], ['emblemas', '🏅', 'Emblemas', `${Object.keys(S.badges).length}/${BADGES.length} conquistados`], ['diario', '📸', 'Diário de provas', 'Todas as fotos por data'], ['stats', '📊', 'Estatísticas', 'Totais e histórico'], ['missoes', '📋', 'Editar missões', 'Obrigatórias, semanais, mínimas'], ['testes', '⚔️', 'Testes de nível', 'Ver e editar'], ['config', '⚙️', 'Configurações', 'Lembretes, orçamento, backup']];
   return `<h2 class="h2">Mais</h2>` + items.map(([k, i, t, d]) => `<button class="menu-item" data-act="sub" data-sub="${k}"><span class="mi-i">${i}</span><span class="grow"><b>${t}</b><br><span class="small muted">${d}</span></span><span>›</span></button>`).join('');
 }
 function viewPerfil() {
@@ -749,6 +768,8 @@ function viewConfig() {
    <label>Horário do lembrete<input name="lembrete" type="time" value="${s.lembrete}"></label>
    <label class="chk"><input type="checkbox" name="lembreteOn" ${s.lembreteOn ? 'checked' : ''}> Lembrete diário (notificação)</label>
    <p class="small muted">O lembrete aparece se as missões obrigatórias não estiverem feitas no horário. Ele funciona com o app aberto ou em segundo plano. Para lembrete garantido com o app fechado, use a versão APK (Capacitor) ou um alarme do celular.</p>
+   <label>Modo Recuperação: dias por mês<input name="recMes" type="number" min="0" max="31" value="${s.recMes}"></label>
+   <label>Modo Recuperação: dias por ano<input name="recAno" type="number" min="0" max="366" value="${s.recAno}"></label>
    <label>Lembrar de fazer backup a cada (dias)<input name="backupDias" type="number" min="1" max="60" value="${s.backupDias}"></label>
    <label>Seu repositório no GitHub (usuario/repositorio)<input name="githubRepo" placeholder="ex.: italo/ficha-backups" value="${esc(s.githubRepo)}"></label>
    <label>Pasta dentro do repositório<input name="githubPasta" value="${esc(s.githubPasta)}"></label>
@@ -757,7 +778,7 @@ function viewConfig() {
    <section class="card"><div class="sec-title"><span>💾 Backup</span></div><p class="small muted">Seus dados ficam só neste aparelho. ${S.lastBackup ? `Último backup: <b>${fmtD(S.lastBackup)}</b>.` : 'Nenhum backup feito ainda.'}</p>
    <button class="btn block" data-act="export">⬇️ Exportar backup (com fotos)</button><label class="btn block">⬆️ Importar backup<input type="file" accept="application/json,.json" data-act="import" hidden></label></section>
    <section class="card"><div class="sec-title"><span>⚠️ Zona de perigo</span></div><button class="btn danger block" data-act="reset">Apagar tudo e recomeçar</button></section>
-   <p class="small muted center">Ficha da Vida v1.0</p>`;
+   <p class="small muted center">Ficha da Vida v1.3</p>`;
 }
 
 /* ---------- Cadastro inicial ---------- */
@@ -811,6 +832,7 @@ function reminderCheck() {
   if (S.notifiedDay === t) return;
   const [hh, mm] = (s.lembrete || '20:00').split(':').map(Number); const now = new Date();
   if (now.getHours() * 60 + now.getMinutes() < hh * 60 + mm) return;
+  if (S.recovery?.active) return;
   const pend = STREAK_ATTRS.filter(a => !dayOk(a, t) && !bridge(a, t));
   S.notifiedDay = t; save();
   if (pend.length) notify('🔥 Sua sequência está em risco!', `Faltam missões de: ${pend.map(a => ATTRS[a].nome).join(', ')}. A versão mínima já salva o dia!`);
@@ -829,7 +851,7 @@ async function exportBackup() {
   S.lastBackup = today(); save(); render();
   const repo = S.settings.githubRepo; const pasta = S.settings.githubPasta;
   const up = repo ? `https://github.com/${repo}/upload/main${pasta ? '/' + pasta : ''}` : null;
-  openModal(`<div class="center"><div class="big-icon pop">💾</div><h2>Backup gerado!</h2><p class="small muted">Arquivo <b>${esc(name)}</b> (${(blob.size / 1024 / 1024).toFixed(2)} MB) salvo nos Downloads.</p></div>
+  openModal(`<div class="center"><div class="big-icon pop">💾</div><h2>Backup gerado!</h2><p class="small muted">Arquivo <b>${esc(name)}</b> (${(blob.size / 1024 / 1024).toFixed(2)} MB) salvo nos Downloads.</p><p class="small">Inclui: ficha completa, <b>${Object.keys(enc).length}</b> foto(s) (provas, testes, crônicas, roleta e referências), <b>${S.refs.length}</b> referência(s) e <b>${S.roleta.reduce((a, c) => a + c.itens.length, 0)}</b> item(ns) da roleta.</p></div>
     <a class="btn block" href="${url}" download="${esc(name)}">⬇️ Baixar de novo</a>
     <h3>Agora envie para o seu GitHub</h3>
     ${up ? `<ol class="small"><li>Toque no botão abaixo (abre a página de upload do <b>${esc(repo)}</b>).</li><li>Toque em <b>choose your files</b> e escolha o arquivo em Downloads.</li><li>Toque em <b>Commit changes</b>. Pronto, salvo! ✅</li></ol>
@@ -841,8 +863,352 @@ async function importBackup(file) {
   try {
     const data = JSON.parse(await file.text()); if (data.app !== 'fichaDaVida') throw new Error('arquivo inválido');
     for (const [k, du] of Object.entries(data.photos || {})) { const b = await (await fetch(du)).blob(); await idbPut(k, b); }
-    S = Object.assign(freshState(), data.state); save(); render(); toast('✅ Backup importado!');
+    S = Object.assign(freshState(), data.state); if (!data.state.v13) S.v13 = false; S.settings = Object.assign(freshState().settings, S.settings); normalize(); save(); render(); toast('✅ Backup importado!');
   } catch (e) { toast('⚠️ Não consegui importar: ' + e.message); }
+}
+
+/* ========== v1.2: Modo Recuperação ========== */
+const SUPPORT_CARD = `<div class="support"><b>💛 Você não está sozinho.</b><br>Se estiver pesado demais, conversar ajuda: alguém de confiança, um profissional de saúde ou o <b>CVV</b>, que atende de graça, 24 h, pelo telefone <b>188</b> ou pelo site <b>cvv.org.br</b> (chat). <a href="tel:188">Ligar 188</a> · <a href="https://cvv.org.br" target="_blank" rel="noopener">cvv.org.br</a></div>`;
+function recUsed(prefix) { return Object.keys(S.recDays || {}).filter(d => d.startsWith(prefix)).length; }
+function recLeft(d = today()) { return { mes: Math.max(0, S.settings.recMes - recUsed(d.slice(0, 7))), ano: Math.max(0, S.settings.recAno - recUsed(d.slice(0, 4))) }; }
+function canRecover(d) { const l = recLeft(d); return l.mes > 0 && l.ano > 0; }
+function tryRecoveryDay(d) {
+  if (S.recDays[d]) return true;
+  if (canRecover(d)) { S.recDays[d] = true; return true; }
+  S.recovery = { active: false, since: null }; S.recEndedNotice = true; return false;
+}
+function ensureRecoveryToday() { if (S.recovery?.active) tryRecoveryDay(today()); }
+function activateRecovery() {
+  const t = today();
+  if (!canRecover(t)) { openModal(`<h2>🌙 Modo Recuperação</h2><p>Seus dias de recuperação deste ${recLeft(t).ano === 0 ? 'ano' : 'mês'} já foram usados.</p><p>Tudo bem: a <b>versão mínima</b> de cada missão continua salvando a sequência, e os protetores 🧊 e o conserto continuam disponíveis.</p>${SUPPORT_CARD}`); return; }
+  S.recovery = { active: true, since: t }; S.recDays[t] = true; S.recEndedNotice = false;
+  afterChange();
+  openModal(`<div class="center"><div class="big-icon pop">🌙</div><h2>Modo Recuperação ativado</h2></div><p>Suas sequências estão <b>congeladas</b>. Nada vai quebrar enquanto o modo estiver ativo.</p><p>As missões ficam todas <b>opcionais</b>. Fez algo hoje? Ótimo, conta. Não fez? Tudo bem também.</p><p class="small muted">Restam ${recLeft(t).mes} dia(s) neste mês e ${recLeft(t).ano} no ano. Você pode sair quando quiser.</p>${SUPPORT_CARD}<button class="btn primary block" data-act="close">Obrigado</button>`);
+}
+function deactivateRecovery() {
+  const t = today(); const since = S.recovery?.since;
+  if (since === t) delete S.recDays[t]; // saiu no mesmo dia: devolve o dia
+  else S.recReturns = (S.recReturns || 0) + 1;
+  S.recovery = { active: false, since: null };
+  afterChange(); toast('🌱 Que bom te ver de volta! Vá no seu ritmo.');
+}
+function recoveryBanner() {
+  const n = Object.keys(S.recDays).filter(d => d >= S.recovery.since && d <= today()).length; const l = recLeft();
+  return `<section class="card rec-card"><div class="row between"><b>🌙 Modo Recuperação, dia ${n}</b><button class="btn xs no-print" data-act="recoff">Sair do modo</button></div><p class="small">Suas sequências estão congeladas. Qualquer coisa que você fizer hoje já é uma vitória. 💛</p><div class="small muted">Restam ${l.mes} dia(s) no mês · ${l.ano} no ano</div><details class="small"><summary>Precisa conversar?</summary>${SUPPORT_CARD}</details></section>`;
+}
+function moodRow(d) {
+  const cur = S.mood?.[d];
+  return `<div class="mood no-print"><span class="small muted">Como você está hoje? <span class="tiny">(opcional)</span></span><div class="mood-btns">${[1, 2, 3, 4, 5].map(n => `<button class="mb ${cur === n ? 'on' : ''}" data-act="mood" data-n="${n}">${MOOD_SCALE[n]}</button>`).join('')}</div></div>`;
+}
+function viewRecuperacao() {
+  const l = recLeft(); const on = S.recovery?.active;
+  const last30 = Array.from({ length: 30 }, (_, i) => addDays(today(), -29 + i));
+  return `<h2 class="h2">🌙 Modo Recuperação</h2>
+  <section class="card"><p>Para fases difíceis, como cansaço extremo, burnout, tristeza ou doença, quando manter a rotina fica pesado demais.</p>
+  <ul class="small"><li>Todas as sequências ficam <b>congeladas</b>, sem gastar protetor nem ouro.</li><li>As missões ficam <b>opcionais</b>, e o chefe semanal descansa.</li><li>O app para de cobrar e de mandar avisos de sequência em risco.</li><li>No calendário, esses dias aparecem como <b>pausa</b> 🌙, nunca como falha.</li></ul>
+  <div class="stat-grid"><div><b>${l.mes}/${S.settings.recMes}</b><span>dias restantes no mês</span></div><div><b>${l.ano}/${S.settings.recAno}</b><span>dias restantes no ano</span></div><div><b>${S.recReturns || 0}</b><span>retornos</span></div></div>
+  ${on ? `<button class="btn primary block" data-act="recoff">🌱 Estou pronto para voltar</button>` : `<button class="btn primary block" data-act="recon">🌙 Ativar Modo Recuperação</button>`}
+  <p class="small muted">Os dias são gastos um por dia enquanto o modo está ativo. Saindo no mesmo dia em que ativou, o dia é devolvido. Quando os dias acabam, o app volta ao normal, mas a <b>versão mínima</b> continua salvando a sequência.</p></section>
+  <section class="card"><div class="sec-title"><span>Humor dos últimos 30 dias</span></div><div class="mood-strip">${last30.map(d => `<span title="${fmtD(d)}" class="${S.recDays[d] ? 'recd' : ''}">${S.mood[d] ? MOOD_SCALE[S.mood[d]] : '·'}</span>`).join('')}</div><p class="tiny muted">Só você vê isso. Fica salvo apenas neste aparelho.</p></section>
+  ${SUPPORT_CARD}`;
+}
+
+/* ========== v1.2: Roleta ========== */
+let role = { cat: null, dur: 'todos', res: null, wheels: null, spinning: false };
+function roleCat(id) { return S.roleta.find(c => c.id === id); }
+function rolePool(c) { return c ? c.itens.filter(it => role.dur === 'todos' || it.dur === role.dur) : []; }
+function weightedPick(pool) { const w = pool.map(it => it.fav ? 3 : 1); let r = Math.random() * w.reduce((a, b) => a + b, 0); for (let i = 0; i < pool.length; i++) { r -= w[i]; if (r <= 0) return pool[i]; } return pool[pool.length - 1]; }
+const WHEEL_COLORS = ['#f59e0b', '#3b82f6', '#a855f7', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#6366f1', '#14b8a6', '#eab308'];
+function makeWheel(pool, winner) {
+  let segs = pool.slice(); if (segs.length > 12) { const others = segs.filter(x => x !== winner).sort(() => Math.random() - 0.5).slice(0, 11); segs = [winner, ...others].sort(() => Math.random() - 0.5); }
+  const i = segs.indexOf(winner); const n = segs.length; const center = (i + 0.5) * 360 / n;
+  return { segs, final: 360 * 6 + (360 - center) + (Math.random() - 0.5) * (300 / n) * 0.6, rot: 0 };
+}
+function wheelSVG(w, idx) {
+  const n = w.segs.length; const R = 100; let g = '';
+  w.segs.forEach((it, i) => {
+    const a0 = (i / n) * 2 * Math.PI - Math.PI / 2, a1 = ((i + 1) / n) * 2 * Math.PI - Math.PI / 2;
+    const x0 = R + R * Math.cos(a0), y0 = R + R * Math.sin(a0), x1 = R + R * Math.cos(a1), y1 = R + R * Math.sin(a1);
+    const large = a1 - a0 > Math.PI ? 1 : 0; const mid = (a0 + a1) / 2; const tx = R + R * 0.6 * Math.cos(mid), ty = R + R * 0.6 * Math.sin(mid);
+    const label = it.t.length > 14 ? it.t.slice(0, 13) + '…' : it.t;
+    g += n === 1 ? `<circle cx="${R}" cy="${R}" r="${R}" fill="${WHEEL_COLORS[0]}"/>` : `<path d="M${R},${R} L${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} Z" fill="${WHEEL_COLORS[i % WHEEL_COLORS.length]}" stroke="#0b1020" stroke-width="1"/>`;
+    g += `<text x="${tx}" y="${ty}" font-size="${n > 8 ? 7 : 8.5}" font-weight="700" fill="#111" text-anchor="middle" dominant-baseline="middle" transform="rotate(${mid * 180 / Math.PI} ${tx} ${ty})">${esc(label)}</text>`;
+  });
+  return `<div class="wheel-box"><div class="pointer">▼</div><svg viewBox="0 0 200 200" class="wheel" id="wheel${idx}" style="transform:rotate(${w.rot}deg)">${g}<circle cx="100" cy="100" r="12" fill="#0b1020" stroke="#fff" stroke-width="2"/></svg></div>`;
+}
+function viewRoleta() {
+  if (!role.cat || (role.cat !== 'desafio' && !roleCat(role.cat))) role.cat = S.roleta[0]?.id || null;
+  const hasDesafio = roleCat('desenhos') && roleCat('estilos');
+  let h = `<h2 class="h2">🎡 Roleta</h2><p class="small muted">Na dúvida do que fazer? Gire. É livre: não gasta ouro e não é missão.</p>`;
+  h += `<div class="filters">${S.roleta.map(c => `<button class="pill ${role.cat === c.id ? 'on' : ''}" data-act="rcat" data-id="${c.id}">${c.icon} ${esc(c.nome)}</button>`).join('')}${hasDesafio ? `<button class="pill ${role.cat === 'desafio' ? 'on' : ''}" data-act="rcat" data-id="desafio">🎯 Desafio de desenho</button>` : ''}</div>`;
+  h += `<div class="pills"><span class="small muted">Tempo:</span>${[['todos', 'Qualquer'], ...Object.entries(DUR)].map(([k, v]) => `<button class="pill ${role.dur === k ? 'on' : ''}" data-act="rdur" data-d="${k}">${v}</button>`).join('')}</div>`;
+  h += `<section class="card center">`;
+  if (role.wheels) h += `<div class="wheels">${role.wheels.map((w, i) => wheelSVG(w, i)).join('')}</div>`;
+  else h += `<div class="big-icon">🎡</div><p class="muted small">${role.cat === 'desafio' ? 'Duas rodas: O QUE desenhar + COMO desenhar.' : 'Toque em Girar!'}</p>`;
+  h += `<button class="btn primary block" data-act="spin" ${role.spinning ? 'disabled' : ''}>${role.res ? '🔄 Girar de novo' : '🎡 Girar'}</button>`;
+  if (role.res && !role.spinning) {
+    const r = role.res;
+    const ri = r.itemId ? roleCat(r.cat)?.itens.find(x => x.id === r.itemId) : null;
+    h += `<div class="role-res pop"><div class="kicker">${r.desafio ? '🎯 Seu desafio' : 'Saiu'}</div><h2>${esc(r.texto)}</h2>${r.dur ? `<div class="small muted">${DUR[r.dur] || ''}</div>` : ''}
+      ${r.imgs?.length ? `<div class="res-imgs">${r.imgs.map(p => `<img data-photo="${p}" data-act="viewphoto" data-pid="${p}" alt="">`).join('')}</div>` : ''}
+      ${ri?.desc ? `<p class="small pre">${esc(ri.desc)}</p>` : ''}
+      ${ri && (ri.link || ri.desc) ? `<div class="row center-row">${linkButtons(ri.link, ri.min, ri.t, ri.desc)}</div>` : ''}
+      <div class="row center-row">${r.feito ? '<span class="tag">✅ Feito!</span>' : `<button class="btn sm" data-act="rdone">✅ Fiz!</button>`}
+      ${(r.desafio || r.cat === 'desenhos') && S.missions.find(m => m.id === 'desenho' && !m.off) ? `<button class="btn sm" data-act="timer" data-id="desenho">⏱ Começar agora</button>` : ''}
+      <button class="btn sm" data-act="rchron">🪶 Crônica</button></div></div>`;
+  }
+  h += `</section>`;
+  // editor da categoria
+  const c = role.cat === 'desafio' ? null : roleCat(role.cat);
+  if (c) {
+    h += `<section class="card"><div class="sec-title"><span>${c.icon} ${esc(c.nome)} <span class="small muted">(${c.itens.length})</span></span></div>
+      ${c.itens.map(it => `<div class="li"><button class="star ${it.fav ? 'on' : ''}" data-act="rfav" data-id="${it.id}" title="Favorito (sai mais vezes)">${it.fav ? '★' : '☆'}</button>${it.img ? `<img class="thumb" data-photo="${it.img}" data-act="viewphoto" data-pid="${it.img}" alt="">` : ''}<span class="grow">${esc(it.t)}${it.link ? ' <span class="tiny">🔗</span>' : ''}${it.min ? ` <span class="tiny muted">${esc(it.min)}</span>` : ''}${it.desc ? `<br><span class="tiny muted">${esc(it.desc.slice(0, 60))}${it.desc.length > 60 ? '…' : ''}</span>` : ''}</span><span class="tag">${DUR[it.dur] || ''}</span>${it.link ? `<a class="btn xs" href="${esc(videoURL(it.link, it.min) || '#')}" target="_blank" rel="noopener">▶️</a>` : ''}<button class="btn xs" data-act="redit" data-id="${it.id}">✏️</button><button class="btn xs" data-act="rrm" data-id="${it.id}">✕</button></div>`).join('') || '<p class="muted small">Lista vazia. Adicione itens abaixo.</p>'}
+      <form class="form roleadd" data-form="roleitem"><div class="addform"><input name="t" placeholder="${c.id === 'videos' ? 'Título do vídeo...' : 'Adicionar item...'}" required><select name="dur">${Object.entries(DUR).map(([k, v]) => `<option value="${k}" ${k === 'medio' ? 'selected' : ''}>${v}</option>`).join('')}</select><button class="btn sm">+</button></div>
+        <details ${c.id === 'videos' ? 'open' : ''}><summary class="small">🔗 Link, minuto, descrição e imagem (opcional)</summary>
+        <label>Link<input name="link" type="url" inputmode="url" placeholder="https://youtube.com/..."></label><label>Minuto de início<input name="min" placeholder="ex.: 12:40"></label>
+        <label>Descrição<textarea name="desc" rows="2" placeholder="Sobre o que é, por que mostrar..."></textarea></label><label>Imagem (referência, capa, pôster)<input type="file" name="img" accept="image/*"></label></details></form>
+      <label class="chk small" style="margin-top:8px"><input type="checkbox" data-act="rremover" ${c.remover ? 'checked' : ''}> Tirar da lista quando eu marcar "Fiz!"</label>
+      <button class="btn xs danger" style="margin-top:8px" data-act="rdelcat" data-id="${c.id}">Excluir categoria</button></section>`;
+  }
+  h += `<section class="card"><div class="sec-title"><span>➕ Nova categoria</span></div><form class="addform" data-form="rolecat"><input name="icon" placeholder="🎵" maxlength="4" style="max-width:60px"><input name="nome" placeholder="Ex.: Músicas, Séries, Artes..." required><button class="btn sm">Criar</button></form></section>`;
+  const hist = S.roletaHist.slice(-15).reverse();
+  if (hist.length) h += `<section class="card"><div class="sec-title"><span>📜 Histórico</span></div>${hist.map(x => `<div class="li small"><span class="grow">${fmtD(x.d)} · ${esc(x.texto)}</span>${x.feito ? '✅' : ''}</div>`).join('')}</section>`;
+  return h;
+}
+function spin() {
+  if (role.spinning) return;
+  let pools;
+  if (role.cat === 'desafio') pools = [rolePool(roleCat('desenhos')), rolePool(roleCat('estilos'))];
+  else pools = [rolePool(roleCat(role.cat))];
+  if (pools.some(p => !p.length)) return toast('Nenhum item com esse filtro de tempo. Adicione itens ou mude o filtro.');
+  const winners = pools.map(weightedPick);
+  role.wheels = pools.map((p, i) => makeWheel(p, winners[i]));
+  role.spinning = true; role.res = null; render();
+  requestAnimationFrame(() => requestAnimationFrame(() => role.wheels?.forEach((w, i) => { const el = document.getElementById('wheel' + i); if (el) { el.style.transition = 'transform 3.2s cubic-bezier(.15,.85,.25,1)'; el.style.transform = `rotate(${w.final}deg)`; } })));
+  try { navigator.vibrate?.(30); } catch (e) { }
+  setTimeout(() => {
+    role.wheels.forEach(w => w.rot = w.final % 360);
+    const desafio = role.cat === 'desafio';
+    const texto = desafio ? `${winners[0].t}, ${winners[1].t.charAt(0).toLowerCase() + winners[1].t.slice(1)}` : winners[0].t;
+    role.res = { texto, desafio, cat: role.cat, dur: desafio ? null : winners[0].dur, itemId: desafio ? null : winners[0].id, imgs: winners.map(w => w.img).filter(Boolean), feito: false };
+    S.roletaHist.push({ d: today(), cat: role.cat, texto, feito: false }); if (S.roletaHist.length > 300) S.roletaHist.shift();
+    role.spinning = false; save(); render();
+    try { navigator.vibrate?.([40, 30, 80]); } catch (e) { }
+  }, 3300);
+}
+function roleDone() {
+  const r = role.res; if (!r || r.feito) return; r.feito = true;
+  const h = S.roletaHist[S.roletaHist.length - 1]; if (h && h.texto === r.texto) h.feito = true;
+  const c = roleCat(r.cat); if (c?.remover && r.itemId) c.itens = c.itens.filter(x => x.id !== r.itemId);
+  save(); render(); toast('✅ Feito! Que tal registrar numa crônica?');
+}
+
+/* ========== v1.2: Relatório imprimível ========== */
+let rep = { tipo: 'semana', off: 0, fotos: true };
+function periodRange(tipo, off) {
+  const t = parseD(today());
+  if (tipo === 'semana') { const ini = addDays(weekKey(), -7 * off); return { ini, fim: addDays(ini, 6), nome: `Semana de ${fmtD(ini)} a ${fmtD(addDays(ini, 6))}` }; }
+  if (tipo === 'mês') { const a = new Date(t.getFullYear(), t.getMonth() - off, 1), b = new Date(t.getFullYear(), t.getMonth() - off + 1, 0); return { ini: dkey(a), fim: dkey(b), nome: a.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }) }; }
+  const y = t.getFullYear() - off; return { ini: `${y}-01-01`, fim: `${y}-12-31`, nome: `Ano de ${y}` };
+}
+function weekdayStats(ini, fim) {
+  const names = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']; const sum = Array(7).fill(0), cnt = Array(7).fill(0);
+  for (let d = ini < S.created ? S.created : ini; d <= fim && d <= today(); d = addDays(d, 1)) { const wd = parseD(d).getDay(); cnt[wd]++; sum[wd] += Object.values(logOf(d)).reduce((s, e) => s + (e.kind === 'full' ? 1 : .5), 0); }
+  const avg = sum.map((s, i) => cnt[i] ? s / cnt[i] : null); const valid = avg.map((v, i) => [v, i]).filter(([v]) => v !== null);
+  if (valid.length < 2) return null;
+  valid.sort((a, b) => b[0] - a[0]); return { best: names[valid[0][1]], worst: names[valid[valid.length - 1][1]], avg, names };
+}
+function delta(a, b) { const d = a - b; return d === 0 ? '<span class="muted">=</span>' : d > 0 ? `<span class="pos">▲ ${d}</span>` : `<span class="neg">▼ ${-d}</span>`; }
+function viewRelatorio() {
+  const opts = rep.tipo === 'semana' ? 8 : rep.tipo === 'mês' ? 12 : 3;
+  let h = `<div class="no-print"><h2 class="h2">📄 Relatório</h2><div class="pills">${['semana', 'mês', 'ano'].map(t => `<button class="pill ${rep.tipo === t ? 'on' : ''}" data-act="rtipo" data-t="${t}">${t === 'semana' ? '📅 Semanal' : t === 'mês' ? '🗓️ Mensal' : '🎆 Anual'}</button>`).join('')}</div>
+    <div class="row"><select data-act="roff">${Array.from({ length: opts }, (_, i) => `<option value="${i}" ${rep.off === i ? 'selected' : ''}>${periodRange(rep.tipo, i).nome}</option>`).join('')}</select>
+    <label class="chk small"><input type="checkbox" data-act="rfotos" ${rep.fotos ? 'checked' : ''}> Incluir fotos</label></div>
+    <button class="btn primary block" data-act="print">🖨️ Imprimir / Salvar PDF</button><p class="tiny muted">No celular, escolha "Salvar como PDF" na tela de impressão.</p></div>`;
+  return h + buildReport(rep.tipo, rep.off, rep.fotos);
+}
+function buildReport(tipo, off, fotos) {
+  const P = periodRange(tipo, off), Q = periodRange(tipo, off + 1);
+  const st = periodStats(P.ini, P.fim), pv = periodStats(Q.ini, Q.fim);
+  const xpT = Object.values(st.xp).reduce((a, b) => a + b, 0), xpP = Object.values(pv.xp).reduce((a, b) => a + b, 0);
+  const recN = Object.keys(S.recDays).filter(d => d >= P.ini && d <= P.fim).length;
+  const moods = Object.entries(S.mood || {}).filter(([d]) => d >= P.ini && d <= P.fim).map(([, v]) => v);
+  const moodAvg = moods.length ? moods.reduce((a, b) => a + b, 0) / moods.length : null;
+  const badges = Object.entries(S.badges).filter(([, v]) => v.d >= P.ini && v.d <= P.fim).map(([id, v]) => { const b = BADGES.find(x => x.id === id); return b ? `${b.icon} ${badgeLabel(b, v.tier)}` : ''; }).filter(Boolean);
+  const bosses = Object.entries(S.bossWon).filter(([k]) => k >= addDays(P.ini, -6) && k <= P.fim).map(([, v]) => v.nome);
+  const roul = S.roletaHist.filter(x => x.d >= P.ini && x.d <= P.fim && x.feito);
+  const rv = Object.values(S.reviews).filter(r => r.ini >= P.ini && r.fim <= P.fim);
+  const wd = weekdayStats(P.ini, P.fim);
+  const tipoNome = { semana: 'Relatório semanal', 'mês': 'Relatório mensal', ano: 'Relatório anual' }[tipo];
+  let h = `<div class="report">`;
+  h += `<section class="card rep-head">${avatarHTML(64)}<div class="grow"><div class="kicker">${tipoNome}</div><h2 style="text-transform:capitalize">${esc(P.nome)}</h2><div class="small">${esc(S.profile.nome)} · ${esc(currentTitle())}</div></div></section>`;
+  if (tipo === 'ano' && S.profile.futuro) h += `<blockquote>Quem eu quero me tornar: “${esc(S.profile.futuro)}”</blockquote>`;
+  h += `<section class="card"><div class="sec-title"><span>📊 Resumo</span><span class="small muted">vs. período anterior</span></div><div class="stat-grid">
+    <div><b>${st.full}</b><span>missões completas ${delta(st.full, pv.full)}</span></div><div><b>${st.min}</b><span>mínimas</span></div>
+    <div><b>${st.dias}</b><span>dias perfeitos ${delta(st.dias, pv.dias)}</span></div><div><b>${xpT}</b><span>XP total ${delta(xpT, xpP)}</span></div>
+    <div><b>+${st.gold}</b><span>🪙 ganho ${delta(st.gold, pv.gold)}</span></div><div><b>${st.gasto}</b><span>🪙 gasto</span></div>
+    <div><b>${st.fotos}</b><span>provas com foto</span></div><div><b>${st.chron.length}</b><span>crônicas</span></div>
+    ${recN ? `<div><b>${recN}</b><span>🌙 dias de pausa</span></div>` : ''}</div></section>`;
+  const maxXp = Math.max(1, ...Object.values(st.xp));
+  h += `<section class="card"><div class="sec-title"><span>⚔️ XP por atributo</span></div>${Object.keys(ATTRS).map(a => `<div class="attr-top small"><span>${ATTRS[a].icon} ${ATTRS[a].nome} · Nv ${S.levels[a]}</span><span>+${st.xp[a]} XP ${delta(st.xp[a], pv.xp[a])}</span></div>${bar(st.xp[a], maxXp, ATTRS[a].cor)}`).join('')}</section>`;
+  h += `<section class="card"><div class="sec-title"><span>🔥 Conquistas do período</span></div>
+    <div class="small"><b>Sequências atuais:</b> ${STREAK_ATTRS.map(a => `${ATTRS[a].icon} ${streak(a)} (recorde ${S.best[a] || 0})`).join(' · ')}</div>
+    ${st.tests.length ? `<div class="small"><b>Testes de nível:</b> ${st.tests.map(t => `${ATTRS[t.attr].nome} ${t.from}→${t.to}`).join(', ')}</div>` : ''}
+    ${bosses.length ? `<div class="small"><b>Chefes derrotados:</b> ${bosses.map(esc).join(', ')}</div>` : ''}
+    ${badges.length ? `<div class="small"><b>Emblemas:</b> ${badges.map(esc).join(', ')}</div>` : ''}
+    ${wd ? `<div class="small"><b>Melhor dia da semana:</b> ${wd.best} · <b>dia mais difícil:</b> ${wd.worst}</div>` : ''}
+    ${moodAvg !== null ? `<div class="small"><b>Humor médio:</b> ${MOOD_SCALE[Math.round(moodAvg)]} (${moodAvg.toFixed(1)} de 5, ${moods.length} registro(s))</div>` : ''}
+    ${roul.length ? `<div class="small"><b>Da roleta, feito:</b> ${roul.map(x => esc(x.texto)).join(', ')}</div>` : ''}
+    ${!st.tests.length && !bosses.length && !badges.length ? '<div class="small muted">Nenhum teste, chefe ou emblema neste período.</div>' : ''}</section>`;
+  if (st.chron.length) h += `<section class="card"><div class="sec-title"><span>🪶 Crônicas</span></div>${st.chron.map(c => `<div class="rep-chron"><b>${esc(c.titulo)}</b> <span class="small muted">${fmtD(c.d)} · ${CHRON_TYPES[c.tipo] || ''}</span>${c.nota ? ` <span class="stars">${'★'.repeat(c.nota)}</span>` : ''}${c.texto ? `<p class="small pre">${esc(c.texto.length > 400 ? c.texto.slice(0, 400) + '…' : c.texto)}</p>` : ''}${fotos && c.photo ? `<img class="rep-img" data-photo="${c.photo}" alt="">` : ''}</div>`).join('')}</section>`;
+  if (rv.length) h += `<section class="card"><div class="sec-title"><span>🔎 Suas revisões</span></div>${rv.map(r => `<div class="small"><b>${r.tipo[0].toUpperCase() + r.tipo.slice(1)} ${fmtD(r.ini)}–${fmtD(r.fim)}</b>${r.respostas.map(x => `<p><i>${esc(x.q)}</i><br>${esc(x.a) || '—'}</p>`).join('')}</div>`).join('')}</section>`;
+  if (fotos) {
+    const gal = [];
+    for (const [d, L] of Object.entries(S.log)) if (d >= P.ini && d <= P.fim) for (const [id, e] of Object.entries(L)) { const m = S.missions.find(x => x.id === id); if (e.photo && m?.attr === 'criativo') gal.push({ d, photo: e.photo, label: m.nome }); }
+    for (const t of st.tests) gal.push({ d: t.d, photo: t.photo, label: `Teste ${ATTRS[t.attr].nome}` });
+    gal.sort((a, b) => a.d.localeCompare(b.d));
+    if (gal.length) h += `<section class="card"><div class="sec-title"><span>🎨 Galeria de evolução</span></div><div class="gallery">${gal.map(g => `<figure><img data-photo="${g.photo}" alt=""><figcaption>${fmtD(g.d)} · ${esc(g.label)}</figcaption></figure>`).join('')}</div></section>`;
+  }
+  h += `<p class="tiny muted center">Gerado pela Ficha da Vida em ${fmtD(today())}</p></div>`;
+  return h;
+}
+async function printReport() {
+  await hydratePhotos();
+  await Promise.all([...document.querySelectorAll('.report img')].map(im => im.complete ? 0 : new Promise(r => { im.onload = im.onerror = r; setTimeout(r, 3000); })));
+  try { window.print(); } catch (e) { toast('Não consegui abrir a impressão neste navegador.'); }
+}
+
+/* ========== v1.3: Links de vídeo, fotos em itens, Referências ========== */
+function parseMin(m) {
+  if (m === undefined || m === null || String(m).trim() === '') return 0;
+  const parts = String(m).trim().split(':').map(x => Number(x) || 0);
+  if (parts.length === 1) return Math.round(parts[0] * 60);          // "12" = 12 minutos
+  return parts.reduce((acc, v) => acc * 60 + v, 0);                   // "12:40" ou "1:02:30"
+}
+function videoURL(link, min) {
+  if (!link) return null; const sec = parseMin(min);
+  try {
+    const u = new URL(/^https?:\/\//.test(link) ? link : 'https://' + link);
+    if (sec > 0) {
+      if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(u.hostname)) u.searchParams.set('t', sec + 's');
+      else u.hash = 't=' + sec;
+    }
+    return u.toString();
+  } catch (e) { return null; }
+}
+async function shareItem(title, desc, link, min) {
+  const url = videoURL(link, min); const text = [title, desc, min ? `▶️ A partir de ${min}` : ''].filter(Boolean).join('\n');
+  try { if (navigator.share) { await navigator.share({ title, text, url: url || undefined }); return; } } catch (e) { if (e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text + (url ? '\n' + url : '')); toast('📋 Copiado! Cole no WhatsApp ou onde quiser.'); } catch (e) { toast('Não consegui compartilhar neste navegador.'); }
+}
+function photoInUse(id) {
+  if (!id) return false;
+  if (S.roleta.some(c => c.itens.some(it => it.img === id))) return true;
+  if (S.refs.some(r => (r.photos || []).includes(id))) return true;
+  if (S.chronicles.some(c => c.photo === id) || S.testsLog.some(t => t.photo === id)) return true;
+  for (const L of Object.values(S.log)) for (const e of Object.values(L)) if (e.photo === id) return true;
+  return false;
+}
+function dropPhotoIfUnused(id) { if (id && !photoInUse(id)) idbDel(id); }
+function linkButtons(link, min, title, desc) {
+  const url = videoURL(link, min);
+  return `${url ? `<a class="btn sm primary" href="${esc(url)}" target="_blank" rel="noopener">▶️ Abrir${min ? ' em ' + esc(min) : ''}</a>` : ''}${url || desc ? `<button class="btn sm" data-act="share" data-title="${esc(title)}" data-desc="${esc(desc || '')}" data-link="${esc(link || '')}" data-min="${esc(min || '')}">📤 Compartilhar</button>` : ''}`;
+}
+// ---- item da roleta: editar ----
+function openRoleItemForm(id) {
+  const c = roleCat(role.cat); const it = c?.itens.find(x => x.id === id); if (!it) return;
+  openModal(`<h2>✏️ Editar item</h2><form class="form" data-form="roleedit" data-id="${it.id}">
+    <label>Nome<input name="t" required value="${esc(it.t)}"></label>
+    <label>Tempo<select name="dur">${Object.entries(DUR).map(([k, v]) => `<option value="${k}" ${it.dur === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <label>Link (vídeo, página, post...)<input name="link" type="url" inputmode="url" placeholder="https://youtube.com/..." value="${esc(it.link || '')}"></label>
+    <label>Minuto de início (ex.: 12:40)<input name="min" placeholder="mm:ss" value="${esc(it.min || '')}"></label>
+    <label>Descrição<textarea name="desc" rows="3" placeholder="Sobre o que é, por que mostrar...">${esc(it.desc || '')}</textarea></label>
+    <label>Imagem (referência, capa, pôster)<input type="file" name="img" accept="image/*"></label>
+    ${it.img ? `<div class="row"><img class="thumb big" data-photo="${it.img}" alt=""><label class="chk"><input type="checkbox" name="rmimg"> Remover imagem</label></div>` : ''}
+    <button class="btn primary block">Salvar</button></form>`);
+}
+async function saveRoleItem(f, isNew) {
+  const fd = new FormData(f); const c = roleCat(role.cat); if (!c) return;
+  let it = isNew ? { id: uid() } : c.itens.find(x => x.id === f.dataset.id); if (!it) return;
+  Object.assign(it, { t: fd.get('t').trim(), dur: fd.get('dur') || 'medio', link: (fd.get('link') || '').trim(), min: (fd.get('min') || '').trim(), desc: (fd.get('desc') || '').trim() });
+  const file = fd.get('img');
+  if (fd.get('rmimg')) { const old = it.img; it.img = null; dropPhotoIfUnused(old); }
+  if (file && file.size) { const old = it.img; it.img = await savePhotoFile(file); dropPhotoIfUnused(old); }
+  if (isNew) c.itens.push(it);
+  closeModal(); save(); render(); toast(isNew ? '➕ Item adicionado!' : 'Salvo ✓');
+}
+// ---- Referências ----
+let refQ = '', refTipo = 'todos';
+function refMatches(r) {
+  if (refTipo !== 'todos' && r.tipo !== refTipo) return false;
+  if (!refQ) return true;
+  const q = refQ.toLowerCase().replace(/^#/, '');
+  return [r.obra, r.onde, r.desc, ...(r.tags || [])].some(x => String(x || '').toLowerCase().includes(q));
+}
+function refCards() {
+  const list = S.refs.filter(refMatches).slice().reverse();
+  if (!list.length) return `<p class="muted center">${S.refs.length ? 'Nada encontrado.' : 'Nenhuma referência ainda. Guarde um episódio, uma página, um painel... 📌'}</p>`;
+  return `<div class="ref-grid">${list.map(r => `<button class="ref-card" data-act="refopen" data-id="${r.id}">${r.photos?.[0] ? `<img data-photo="${r.photos[0]}" alt="">` : `<div class="ref-ph">${(REF_TYPES[r.tipo] || '📌').split(' ')[0]}</div>`}<div class="ref-txt"><b>${esc(r.obra)}</b><span class="small">${esc(r.onde || '')}</span>${r.photos?.length > 1 ? `<span class="tiny muted">📷 ${r.photos.length}</span>` : ''}</div>${r.fav ? '<span class="ref-fav">★</span>' : ''}</button>`).join('')}</div>`;
+}
+function viewRefs() {
+  return `<div class="row between"><h2 class="h2">📌 Referências</h2><button class="btn primary" data-act="refnew">+ Nova</button></div>
+  <p class="small muted">Guarde onde está aquilo que você gosta: "Episódio X de Turma da Mônica", "Vagabond vol. 12, pág. 37", com as fotos dos melhores painéis.</p>
+  <input class="search" data-act="refq" placeholder="🔎 Buscar por obra, tag (#luz), descrição..." value="${esc(refQ)}">
+  <div class="filters">${[['todos', 'Todas'], ...Object.entries(REF_TYPES)].map(([k, v]) => `<button class="pill ${refTipo === k ? 'on' : ''}" data-act="reftipo" data-t="${k}">${v}</button>`).join('')}</div>
+  ${S.refs.length ? `<button class="btn sm" data-act="refrandom">🎡 Sortear uma referência</button>` : ''}
+  <div id="reflist">${refCards()}</div>`;
+}
+let refDraft = null; // { id?, photos: [], newFiles: [] }
+function openRefForm(id) {
+  const r = S.refs.find(x => x.id === id) || { obra: '', onde: '', tipo: 'manga', desc: '', link: '', min: '', tags: [], photos: [] };
+  refDraft = { id: id || null, photos: (r.photos || []).slice(), newFiles: [] };
+  openModal(`<h2>${id ? '✏️ Editar' : '📌 Nova'} referência</h2><form class="form" data-form="ref">
+    <label>Obra<input name="obra" required placeholder="Ex.: Vagabond, Turma da Mônica" value="${esc(r.obra)}"></label>
+    <label>Onde está<input name="onde" placeholder="Ex.: Volume 12, página 37 · Episódio 45" value="${esc(r.onde)}"></label>
+    <label>Tipo<select name="tipo">${Object.entries(REF_TYPES).map(([k, v]) => `<option value="${k}" ${r.tipo === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <label>Descrição<textarea name="desc" rows="3" placeholder="Por que isso é uma boa referência?">${esc(r.desc)}</textarea></label>
+    <label>Link (opcional)<input name="link" type="url" inputmode="url" value="${esc(r.link || '')}" placeholder="https://"></label>
+    <label>Minuto (se for vídeo)<input name="min" placeholder="mm:ss" value="${esc(r.min || '')}"></label>
+    <label>Tags (separe por espaço)<input name="tags" placeholder="#luz #anatomia #narrativa" value="${esc((r.tags || []).map(t => '#' + t).join(' '))}"></label>
+    <div class="small"><b>Fotos</b> (capa, melhores painéis). A primeira vira a capa.</div>
+    <div id="refphotos" class="ref-photos">${refPhotosHTML()}</div>
+    <label class="btn">📷 Adicionar fotos<input type="file" accept="image/*" multiple data-act="refaddph" hidden></label>
+    <button class="btn primary block">Salvar referência</button>
+    ${id ? `<button type="button" class="btn danger block" data-act="refdel" data-id="${id}">Excluir referência</button>` : ''}</form>`);
+}
+function refPhotosHTML() {
+  if (!refDraft) return '';
+  const ex = refDraft.photos.map((p, i) => `<div class="rp"><img data-photo="${p}" alt=""><button type="button" class="x-mini" data-act="refrmph" data-i="${i}">✕</button></div>`);
+  const nw = refDraft.newFiles.map((f, i) => `<div class="rp"><img src="${URL.createObjectURL(f)}" alt=""><button type="button" class="x-mini" data-act="refrmnew" data-i="${i}">✕</button></div>`);
+  return ex.concat(nw).join('') || '<span class="tiny muted">Nenhuma foto.</span>';
+}
+function redrawRefPhotos() { const el = $('#refphotos'); if (el) { el.innerHTML = refPhotosHTML(); hydratePhotos(el); } }
+async function submitRef(f) {
+  const fd = new FormData(f); const isNew = !refDraft.id;
+  const r = isNew ? { id: uid(), d: today() } : S.refs.find(x => x.id === refDraft.id);
+  const before = (r.photos || []).slice();
+  const added = []; for (const file of refDraft.newFiles) added.push(await savePhotoFile(file));
+  Object.assign(r, { obra: fd.get('obra').trim(), onde: fd.get('onde').trim(), tipo: fd.get('tipo'), desc: fd.get('desc').trim(), link: fd.get('link').trim(), min: fd.get('min').trim(),
+    tags: fd.get('tags').split(/[\s,]+/).map(t => t.replace(/^#/, '').trim().toLowerCase()).filter(Boolean), photos: refDraft.photos.concat(added) });
+  if (isNew) S.refs.push(r);
+  for (const p of before) if (!r.photos.includes(p)) dropPhotoIfUnused(p);
+  refDraft = null; closeModal(); save(); render(); toast('📌 Referência salva!');
+}
+function openRefDetail(id) {
+  const r = S.refs.find(x => x.id === id); if (!r) return;
+  openModal(`<div class="kicker">${REF_TYPES[r.tipo] || ''}</div><h2>${esc(r.obra)}</h2>${r.onde ? `<div class="ref-onde">📍 ${esc(r.onde)}</div>` : ''}
+    ${(r.photos || []).map(p => `<img class="ref-full" data-photo="${p}" alt="">`).join('')}
+    ${r.desc ? `<p class="pre">${esc(r.desc)}</p>` : ''}
+    ${r.tags?.length ? `<div class="pills">${r.tags.map(t => `<button class="pill" data-act="reftag" data-t="${esc(t)}">#${esc(t)}</button>`).join('')}</div>` : ''}
+    <div class="row">${linkButtons(r.link, r.min, `${r.obra}${r.onde ? ' — ' + r.onde : ''}`, r.desc)}</div>
+    <div class="row" style="margin-top:8px"><button class="btn sm" data-act="reffav" data-id="${r.id}">${r.fav ? '★ Favorita' : '☆ Favoritar'}</button><button class="btn sm" data-act="refedit" data-id="${r.id}">✏️ Editar</button>${r.photos?.length ? `<button class="btn sm" data-act="ref2roleta" data-id="${r.id}">🎨 Usar como desenho na roleta</button>` : ''}</div>
+    <p class="tiny muted">Guardada em ${fmtD(r.d)}</p>`);
+}
+function refToRoleta(id) {
+  const r = S.refs.find(x => x.id === id); let c = roleCat('desenhos');
+  if (!c) { c = { id: 'desenhos', nome: 'Desenhos', icon: '🎨', itens: [] }; S.roleta.push(c); }
+  c.itens.push({ id: uid(), t: `${r.obra}${r.onde ? ' (' + r.onde + ')' : ''}`, dur: 'medio', img: r.photos[0], desc: r.desc, link: r.link, min: r.min });
+  save(); toast('🎨 Adicionada à roleta de Desenhos, com a foto de referência!');
 }
 
 /* ---------- Eventos ---------- */
@@ -850,12 +1216,12 @@ document.addEventListener('click', async ev => {
   const el = ev.target.closest('[data-act]'); const navb = ev.target.closest('#nav button');
   if (navb) { tab = navb.dataset.tab; sub = null; render(); window.scrollTo(0, 0); return; }
   if (!el) { if (ev.target.id === 'modal') closeModal(); return; }
-  if (el.tagName === 'INPUT' || el.tagName === 'LABEL') return;
+  if (el.tagName === 'INPUT' || el.tagName === 'LABEL' || el.tagName === 'SELECT') return;
   const A = el.dataset.act, D = el.dataset;
   switch (A) {
     case 'close': closeModal(); break;
     case 'go': tab = D.tab; sub = D.sub || null; closeModal(); render(); window.scrollTo(0, 0); break;
-    case 'sub': sub = D.sub || null; render(); window.scrollTo(0, 0); break;
+    case 'sub': if (D.go) tab = 'mais'; sub = D.sub || null; closeModal(); render(); window.scrollTo(0, 0); break;
     case 'mark': markMission(D.id, D.kind); break;
     case 'bonus': toggleBonus(Number(D.i)); break;
     case 'timer': openTimer(D.id); break;
@@ -896,6 +1262,33 @@ document.addEventListener('click', async ev => {
     case 'obback': obCollect(); ob.step = Math.max(0, ob.step - 1); render(); break;
     case 'obpick': ob.data[D.f] = D.v; if (D.f === 'meta') { const v = $('#obv')?.value; ob.data.orcamento = Number(v) || 0; } render(); break;
     case 'obfinish': obFinish(); break;
+    case 'recon': activateRecovery(); break;
+    case 'recoff': deactivateRecovery(); break;
+    case 'recnoticeok': S.recEndedNotice = false; save(); render(); break;
+    case 'mood': { const n = Number(D.n); if (S.mood[today()] === n) delete S.mood[today()]; else S.mood[today()] = n; save(); render(); break; }
+    case 'rcat': role.cat = D.id; role.res = null; role.wheels = null; render(); break;
+    case 'rdur': role.dur = D.d; render(); break;
+    case 'spin': spin(); break;
+    case 'rdone': roleDone(); break;
+    case 'rchron': { const r = role.res; if (r) openChronForm({ titulo: r.texto, tipo: r.cat === 'filmes' ? 'filme' : r.cat === 'livros' ? 'livro' : 'obra', attr: r.cat === 'livros' ? 'mental' : 'criativo' }); break; }
+    case 'rfav': { const c = roleCat(role.cat); const it = c?.itens.find(x => x.id === D.id); if (it) { it.fav = !it.fav; save(); render(); } break; }
+    case 'rrm': { const c = roleCat(role.cat); if (c) { const it = c.itens.find(x => x.id === D.id); c.itens = c.itens.filter(x => x.id !== D.id); if (it?.img) dropPhotoIfUnused(it.img); save(); render(); } break; }
+    case 'rdelcat': if (el.dataset.confirm === '1') { S.roleta = S.roleta.filter(c => c.id !== D.id); role.cat = null; role.res = null; role.wheels = null; save(); render(); } else { el.dataset.confirm = '1'; el.textContent = 'Toque de novo para excluir'; } break;
+    case 'rtipo': rep.tipo = D.t; rep.off = 0; render(); break;
+    case 'print': printReport(); break;
+    case 'redit': openRoleItemForm(D.id); break;
+    case 'share': shareItem(D.title, D.desc, D.link, D.min); break;
+    case 'refnew': openRefForm(); break;
+    case 'refopen': openRefDetail(D.id); break;
+    case 'refedit': openRefForm(D.id); break;
+    case 'reffav': { const r = S.refs.find(x => x.id === D.id); if (r) { r.fav = !r.fav; save(); openRefDetail(r.id); render(); } break; }
+    case 'reftipo': refTipo = D.t; render(); break;
+    case 'reftag': refQ = '#' + D.t; refTipo = 'todos'; closeModal(); tab = 'mais'; sub = 'referencias'; render(); break;
+    case 'refrandom': { const pool = S.refs.filter(refMatches); if (pool.length) openRefDetail(pool[Math.floor(Math.random() * pool.length)].id); break; }
+    case 'ref2roleta': refToRoleta(D.id); break;
+    case 'refrmph': if (refDraft) { refDraft.photos.splice(Number(D.i), 1); redrawRefPhotos(); } break;
+    case 'refrmnew': if (refDraft) { refDraft.newFiles.splice(Number(D.i), 1); redrawRefPhotos(); } break;
+    case 'refdel': if (el.dataset.confirm === '1') { const r = S.refs.find(x => x.id === D.id); S.refs = S.refs.filter(x => x.id !== D.id); (r?.photos || []).forEach(dropPhotoIfUnused); closeModal(); save(); render(); toast('Referência excluída.'); } else { el.dataset.confirm = '1'; el.textContent = 'Toque de novo para excluir'; } break;
   }
 });
 document.addEventListener('change', async ev => {
@@ -906,13 +1299,24 @@ document.addEventListener('change', async ev => {
   if (A === 'proof' && f) return attachProof(el.dataset.id, f);
   if (A === 'avatarimg' && f) { S.profile.avatar = { type: 'img', data: await resizeImage(f, 256, true) }; save(); render(); return; }
   if (A === 'coverimg' && f) { S.profile.cover = await resizeImage(f, 1000, true, 0.78); save(); render(); return; }
+  if (A === 'refaddph' && el.files?.length) { refDraft?.newFiles.push(...el.files); el.value = ''; redrawRefPhotos(); return; }
+  if (A === 'roff') { rep.off = Number(el.value); render(); return; }
+  if (A === 'rfotos') { rep.fotos = el.checked; render(); return; }
+  if (A === 'rremover') { const c = roleCat(role.cat); if (c) { c.remover = el.checked; save(); } return; }
   if (A === 'accent') { S.settings.accent = el.value; save(); render(); return; }
   if (A === 'import' && f) return importBackup(f);
+});
+document.addEventListener('input', ev => {
+  if (ev.target.dataset?.act === 'refq') { refQ = ev.target.value; const l = $('#reflist'); if (l) { l.innerHTML = refCards(); hydratePhotos(l); } }
 });
 document.addEventListener('submit', async ev => {
   const f = ev.target; const kind = f.dataset.form; if (!kind) return; ev.preventDefault(); const fd = new FormData(f);
   if (kind === 'addlist') { S.lists[f.dataset.k].push(fd.get('v').trim()); save(); render(); setTimeout(() => document.querySelectorAll('details.list-ed').forEach(d => { if (d.querySelector(`[data-k="${f.dataset.k}"]`)) d.open = true; }), 0); }
   if (kind === 'chron') await submitChron(f);
+  if (kind === 'roleitem') await saveRoleItem(f, true);
+  if (kind === 'roleedit') await saveRoleItem(f, false);
+  if (kind === 'ref') await submitRef(f);
+  if (kind === 'rolecat') { const id = 'c_' + uid(); S.roleta.push({ id, nome: fd.get('nome').trim(), icon: (fd.get('icon') || '🎲').trim() || '🎲', itens: [] }); role.cat = id; role.res = null; role.wheels = null; save(); render(); }
   if (kind === 'perfil') { Object.assign(S.profile, { nome: fd.get('nome'), idade: fd.get('idade'), classe: fd.get('classe'), futuro: fd.get('futuro'), titulo: fd.get('titulo') }); save(); render(); toast('Salvo ✓'); }
   if (kind === 'review') {
     const p = reviewPeriods().find(x => x.key === f.dataset.key); if (!p) return;
@@ -928,7 +1332,7 @@ document.addEventListener('submit', async ev => {
   if (kind === 'config') {
     const on = !!fd.get('lembreteOn');
     if (on && 'Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { } }
-    Object.assign(S.settings, { meta: fd.get('meta'), orcamento: Number(fd.get('orcamento')) || 0, goldCap: Number(fd.get('goldCap')) || 1000, lembrete: fd.get('lembrete'), lembreteOn: on, backupDias: Number(fd.get('backupDias')) || 7, githubRepo: (fd.get('githubRepo') || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, ''), githubPasta: (fd.get('githubPasta') || '').trim().replace(/^\/+|\/+$/g, '') });
+    Object.assign(S.settings, { meta: fd.get('meta'), orcamento: Number(fd.get('orcamento')) || 0, goldCap: Number(fd.get('goldCap')) || 1000, lembrete: fd.get('lembrete'), lembreteOn: on, backupDias: Number(fd.get('backupDias')) || 7, recMes: Math.max(0, Number(fd.get('recMes')) || 0), recAno: Math.max(0, Number(fd.get('recAno')) || 0), githubRepo: (fd.get('githubRepo') || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, ''), githubPasta: (fd.get('githubPasta') || '').trim().replace(/^\/+|\/+$/g, '') });
     if (on && 'Notification' in window && Notification.permission === 'denied') toast('⚠️ Notificações bloqueadas no navegador.');
     save(); render(); toast('Salvo ✓');
   }
@@ -943,13 +1347,13 @@ function openShopEditor() {
 function boot() {
   load();
   if (S.onboarded) {
-    const notes = processDays(); afterChange();
+    const notes = processDays(); ensureRecoveryToday(); afterChange();
     notes.forEach((n, i) => setTimeout(() => toast(n), 600 + i * 900));
   } else render();
   setInterval(reminderCheck, 60000); setTimeout(reminderCheck, 3000);
   // virada do dia com o app aberto
   let lastDay = today();
-  setInterval(() => { if (today() !== lastDay) { lastDay = today(); if (S.onboarded) { processDays(); afterChange(); } } }, 30000);
+  setInterval(() => { if (today() !== lastDay) { lastDay = today(); if (S.onboarded) { processDays(); ensureRecoveryToday(); afterChange(); } } }, 30000);
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 }
 boot();

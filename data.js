@@ -51,7 +51,7 @@ const DEFAULT_SHOP = [
   { id: 's1', nome: '1 hora de jogo livre', preco: 20, tipo: 'tempo', reais: 0 },
   { id: 's2', nome: '1 episódio ou filme', preco: 15, tipo: 'tempo', reais: 0 },
   { id: 's3', nome: 'Dormir até mais tarde no fim de semana', preco: 30, tipo: 'tempo', reais: 0 },
-  { id: 's4', nome: '🧊 Protetor de ofensiva', preco: 50, tipo: 'protetor', reais: 0 },
+  { id: 's4', nome: '🧊 Bloqueio de ofensiva', preco: 50, tipo: 'protetor', reais: 0 },
   { id: 's5', nome: '🏖️ Dia de folga (protege todas as sequências hoje)', preco: 80, tipo: 'folga', reais: 0 },
   { id: 's6', nome: '🎁 Baú extra', preco: 25, tipo: 'bau', reais: 0 },
   { id: 's7', nome: 'Lanche ou delivery', preco: 40, tipo: 'real', reais: 30 },
@@ -143,10 +143,37 @@ const GUIDE_QUESTIONS = {
   curso: ['O que você aprendeu de mais útil?', 'Como vai usar isso?'],
   obra: ['O que você faria diferente?', 'Qual técnica nova usou?'],
   projeto: ['Qual problema resolveu?', 'O que aprendeu de novo?'],
-  treino: ['O que tornou esse treino marcante?', 'Como o corpo respondeu?']
+  treino: ['O que tornou esse treino marcante?', 'Como o corpo respondeu?'],
+  filme: ['O que mais te marcou no filme?', 'Você assistiria de novo? Por quê?', 'Que ideia dele você levaria para as suas histórias?']
 };
 const CHRON_TYPES = {
   livro: '📖 Livro/Mangá', teste: '⚔️ Teste de nível', curso: '🎓 Curso/Certificado',
-  obra: '🎨 Obra criativa', projeto: '💻 Projeto', treino: '🥋 Treino marcante'
+  obra: '🎨 Obra criativa', projeto: '💻 Projeto', treino: '🥋 Treino marcante', filme: '🎬 Filme/Série'
 };
 const MOODS = { suado: '😤 Suado', tranquilo: '😌 Tranquilo', impressionado: '🤯 Impressionado', arrastado: '😴 Arrastado' };
+
+// ===== v1.2: Roleta =====
+// dur: 'curto' | 'medio' | 'longo'
+const DEFAULT_ROLETA = [
+  { id: 'filmes', nome: 'Filmes', icon: '🎬', itens: [
+    { t: 'Um filme de ficção científica', dur: 'longo' }, { t: 'Uma animação', dur: 'medio' }, { t: 'Um filme de ação', dur: 'longo' },
+    { t: 'Um curta-metragem', dur: 'curto' }, { t: 'Um clássico que nunca viu', dur: 'longo' }, { t: 'Um filme de terror', dur: 'longo' }] },
+  { id: 'desenhos', nome: 'Desenhos', icon: '🎨', itens: [
+    { t: 'Espada', dur: 'curto' }, { t: 'Slime', dur: 'curto' }, { t: 'Baú de tesouro', dur: 'curto' }, { t: 'Personagem chibi', dur: 'medio' },
+    { t: 'Rosto de frente', dur: 'medio' }, { t: 'Mão em pose', dur: 'medio' }, { t: 'Árvore', dur: 'curto' }, { t: 'Castelo', dur: 'longo' },
+    { t: 'Monstro inventado', dur: 'medio' }, { t: 'Cenário de floresta', dur: 'longo' }] },
+  { id: 'estilos', nome: 'Estilos (como desenhar)', icon: '🖌️', itens: [
+    { t: 'Pixel art 16x16', dur: 'curto' }, { t: 'Pixel art 32x32', dur: 'medio' }, { t: 'Só 3 cores', dur: 'curto' }, { t: 'Em 10 minutos', dur: 'curto' },
+    { t: 'Estilo Ultrakill (low-poly sujo)', dur: 'medio' }, { t: 'Só linhas, sem sombra', dur: 'curto' }, { t: 'Com sombra e luz', dur: 'medio' }, { t: 'Mão não dominante', dur: 'curto' }] },
+  { id: 'jogos', nome: 'Jogos', icon: '🎮', itens: [
+    { t: '1 partida de Ultrakill', dur: 'curto' }, { t: '30 min de Minecraft', dur: 'medio' }, { t: 'Roblox com amigos', dur: 'medio' }, { t: 'Jogo indie da biblioteca', dur: 'longo' }] },
+  { id: 'livros', nome: 'Leituras', icon: '📚', itens: [
+    { t: '1 capítulo de mangá', dur: 'curto' }, { t: 'Um conto curto', dur: 'curto' }, { t: 'Continuar o livro atual', dur: 'medio' }] }
+];
+const DUR = { curto: '⚡ Curto', medio: '⏳ Médio', longo: '🕰️ Longo' };
+const MOOD_SCALE = { 5: '😄', 4: '🙂', 3: '😐', 2: '😔', 1: '😞' };
+
+// ===== v1.3 =====
+const MAX_FREEZES = 7;
+const VIDEO_CAT = { id: 'videos', nome: 'Vídeos para mostrar', icon: '🎥', itens: [] };
+const REF_TYPES = { manga: '📚 Mangá/HQ', serie: '📺 Série/Episódio', filme: '🎬 Filme', video: '🎥 Vídeo', arte: '🎨 Arte', livro: '📖 Livro', outro: '📌 Outro' };
